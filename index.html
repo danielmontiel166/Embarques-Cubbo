@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Embarques Cubbo - Sistema de Manifiestos</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, updateDoc } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+
+        // Configuración de Firebase (Se llena automáticamente en el entorno o manualmente por el usuario)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "" };
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'embarques-cubbo-v1';
+
+        window.db = db;
+        window.auth = auth;
+        window.appId = appId;
+        window.firestore = { doc, setDoc, getDoc, collection, query, onSnapshot, updateDoc };
+
+        async function init() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (e) { console.error("Error Auth", e); }
+        }
+        init();
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .signature-pad { border: 2px dashed #cbd5e1; background-color: #f8fafc; cursor: crosshair; touch-action: none; }
+        @media print { .no-print { display: none; } }
+        .loading-overlay { background: rgba(255,255,255,0.8); backdrop-filter: blur(4px); }
+        .table-container { max-height: 450px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 8px; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+    <div id="loader" class="fixed inset-0 z-[100] hidden flex items-center justify-center loading-overlay">
+        <div class="text-center">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+            <p id="loader-text" class="text-xs font-black uppercase tracking-widest text-slate-600">Procesando...</p>
+        </div>
+    </div>
+
+    <!-- PANTALLA 1: Selección de Almacén -->
+    <section id="warehouse-selection" class="min-h-screen flex flex-col items-center justify-center p-6">
+        <div class="mb-12 text-center">
+            <h1 class="text-4xl font-black text-slate-900 mb-2 tracking-tight italic">Embarques <span class="text-blue-600">Cubbo</span></h1>
+            <p class="text-slate-500 text-lg">Control de Salidas y Logística de Última Milla</p>
+        </div>
+        <div id="warehouse-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl w-full"></div>
+    </section>
+
+    <!-- PANTALLA 2: Dashboard y App -->
+    <div id="main-app" class="hidden">
+        <nav class="bg-slate-900 text-white p-4 shadow-lg no-print sticky top-0 z-50">
+            <div class="container mx-auto flex justify-between items-center">
+                <div class="flex items-center gap-4">
+                    <button onclick="backToWarehouses()" class="text-slate-400 hover:text-white transition p-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+                    </button>
+                    <h1 id="active-warehouse-title" class="text-xl font-bold uppercase tracking-tight">--</h1>
+                </div>
+                <div class="text-right">
+                    <span id="status-db" class="text-[10px] font-medium text-blue-400 tracking-widest uppercase">Portal de Embarques</span>
+                </div>
+            </div>
+        </nav>
+
+        <main class="container mx-auto p-4 md:p-8">
+            <!-- Dashboard de Historial -->
+            <section id="dashboard" class="no-print">
+                <div class="mb-8">
+                    <h2 class="text-2xl font-bold text-slate-800">Historial de Embarques</h2>
+                    <p class="text-slate-500 text-sm italic">Recupera guías procesadas para firma del transportista.</p>
+                </div>
+
+                <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-8">
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Fecha de Carga</label>
+                            <input type="date" id="filter-date" class="w-full border border-slate-300 rounded-lg px-4 py-2.5 outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                        </div>
+                        <div class="md:col-span-3">
+                            <button onclick="fetchConsolidatedData()" class="w-full bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition font-bold uppercase text-xs tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-blue-200">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                                Consultar Registros de Embarque
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                    <table class="w-full text-left">
+                        <thead class="bg-slate-50 text-slate-400 uppercase text-[10px] font-black tracking-widest border-b">
+                            <tr>
+                                <th class="px-6 py-4">Transportadora</th>
+                                <th class="px-6 py-4">Estado</th>
+                                <th class="px-6 py-4">Guías Totales</th>
+                                <th class="px-6 py-4 text-right">Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100" id="query-results">
+                            <tr><td colspan="4" class="px-6 py-10 text-center text-slate-400 italic">Selecciona una fecha para ver los embarques programados.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Manifiesto de Embarque -->
+            <section id="manifest-viewer" class="hidden max-w-5xl mx-auto mt-8 pb-32">
+                <div class="flex justify-between items-center mb-6 no-print">
+                    <button onclick="hideManifest()" class="text-slate-500 hover:text-slate-800 font-bold text-xs uppercase tracking-widest flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
+                        Regresar
+                    </button>
+                    <button onclick="downloadPDF()" id="download-btn" class="bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700 font-bold text-xs uppercase hidden">Descargar Manifiesto</button>
+                </div>
+
+                <div id="document-to-print" class="bg-white p-12 shadow-2xl border border-slate-200 rounded-sm">
+                    <!-- Header -->
+                    <div class="flex justify-between items-start border-b-4 border-slate-900 pb-8 mb-8">
+                        <div>
+                            <h1 class="text-4xl font-black uppercase tracking-tighter mb-1 italic">Embarques <span class="text-blue-600">Cubbo</span></h1>
+                            <p class="text-slate-400 font-mono text-[11px] uppercase" id="doc-id">Embarque ID: #--</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="font-black text-xl" id="doc-warehouse-origin">--</p>
+                            <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Cubbo Fulfillment Network</p>
+                        </div>
+                    </div>
+
+                    <!-- Datos Resumen -->
+                    <div class="grid grid-cols-3 gap-6 mb-10">
+                        <div class="bg-slate-50 p-5 rounded-lg border border-slate-100">
+                            <h3 class="text-[10px] font-bold text-slate-400 uppercase mb-2">Carrier / Transportadora</h3>
+                            <p id="doc-courier" class="text-2xl font-black text-slate-900">--</p>
+                        </div>
+                        <div class="bg-slate-50 p-5 rounded-lg border border-slate-100">
+                            <h3 class="text-[10px] font-bold text-slate-400 uppercase mb-2">Fecha de Salida</h3>
+                            <p id="doc-date" class="text-xl font-bold">--</p>
+                        </div>
+                        <div class="bg-slate-50 p-5 rounded-lg border border-slate-100">
+                            <h3 class="text-[10px] font-bold text-slate-400 uppercase mb-2">Volumen (Bultos)</h3>
+                            <p id="doc-count" class="text-xl font-bold">--</p>
+                        </div>
+                    </div>
+
+                    <!-- Tabla -->
+                    <div class="mb-12 table-container">
+                        <table class="w-full text-[10px] border-collapse">
+                            <thead class="sticky top-0 bg-slate-900 text-white">
+                                <tr>
+                                    <th class="border border-slate-900 p-3 text-left w-14">#</th>
+                                    <th class="border border-slate-900 p-3 text-left">Tracking Number / Guía</th>
+                                    <th class="border border-slate-900 p-3 text-left">Hora Escaneo</th>
+                                </tr>
+                            </thead>
+                            <tbody id="manifest-table-body" class="text-slate-800"></tbody>
+                        </table>
+                    </div>
+
+                    <!-- Firmas -->
+                    <div class="grid grid-cols-2 gap-24 mt-20 pt-10 border-t-2 border-slate-100">
+                        <div class="text-center">
+                            <div class="h-24 border-b border-slate-300 flex items-end justify-center pb-3">
+                                <span class="text-slate-300 uppercase text-[11px] font-bold italic">Sello del Almacén</span>
+                            </div>
+                            <p class="text-[10px] mt-3 font-bold uppercase text-slate-600">Autorización Embarque Cubbo</p>
+                        </div>
+                        <div class="text-center">
+                            <div id="signature-container" class="no-print relative mb-2">
+                                <canvas id="sig-canvas" class="signature-pad w-full h-24 rounded border-slate-200 shadow-inner"></canvas>
+                                <button onclick="clearSignature()" class="absolute top-1 right-1 text-[9px] bg-red-50 text-red-500 px-3 py-1 rounded shadow-sm border border-red-100 font-bold uppercase">Borrar</button>
+                            </div>
+                            <div id="sig-image-container" class="h-24 flex items-center justify-center border-b border-slate-300">
+                                <p class="text-slate-300 text-[10px] uppercase font-bold italic animate-pulse">Chofer firma aquí</p>
+                            </div>
+                            <p class="text-[10px] mt-3 font-bold uppercase text-slate-900 tracking-wider tracking-tighter">Firma Transportista / Recibido</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-14 flex justify-center no-print">
+                    <button id="finish-btn" onclick="unifiedFinish()" class="bg-blue-600 text-white px-16 py-5 rounded-2xl font-black hover:bg-slate-900 shadow-2xl transition active:scale-95 uppercase tracking-tighter text-base flex items-center gap-4">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg>
+                        Finalizar y Enviar a Embarques
+                    </button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        const warehouseData = {
+            'Polanco CDMX': ['FEDEX', 'IMILE', 'CUBBO', 'UPS', 'DHL', '99MINUTOS'],
+            'Sao Paulo - Embu': ['IMILE', 'JT Express', 'LOGGI', 'CORREIOS'],
+            'Nave 13': ['FEDEX', 'IMILE', 'CUBBO', 'UPS'],
+            'Tlalne1': ['FEDEX', 'IMILE', 'CUBBO', 'AMAZON'],
+            'Rio Grande do Sul - Porto Alegre': ['TOTAL EXPRESS', 'LOGGI', 'CORREIOS', 'JADLOG'],
+            'Amazonas - Manaus': ['AZUL CARGO', 'LOGGI', 'CORREIOS'],
+            'Minas Gerais - Extrema': ['IMILE', 'TOTAL EXPRESS', 'LOGGI', 'MERCADO ENVIOS']
+        };
+
+        let currentWH = '';
+        let fetchedDataFromDB = {}; 
+        let currentCarrier = '';
+        let currentLoteId = '';
+        const canvas = document.getElementById('sig-canvas');
+        const ctx = canvas.getContext('2d');
+        let drawing = false;
+
+        window.onload = renderWH;
+
+        function renderWH() {
+            const grid = document.getElementById('warehouse-grid');
+            grid.innerHTML = '';
+            Object.keys(warehouseData).forEach(name => {
+                const btn = document.createElement('button');
+                btn.onclick = () => {
+                    currentWH = name;
+                    document.getElementById('warehouse-selection').classList.add('hidden');
+                    document.getElementById('main-app').classList.remove('hidden');
+                    document.getElementById('active-warehouse-title').innerText = name;
+                    document.getElementById('filter-date').value = new Date().toISOString().split('T')[0];
+                };
+                btn.className = "bg-white p-8 rounded-3xl shadow-sm border border-slate-200 text-center hover:border-blue-500 hover:shadow-xl transition-all flex flex-col justify-center items-center min-h-[180px] group";
+                btn.innerHTML = `
+                    <h3 class="font-black text-slate-800 text-xl group-hover:text-blue-600 transition-colors uppercase tracking-tighter">${name}</h3>
+                    <div class="mt-4 h-1 w-8 bg-slate-100 group-hover:w-16 group-hover:bg-blue-600 transition-all duration-300"></div>
+                    <p class="text-slate-400 text-[10px] font-bold uppercase mt-4 tracking-[0.2em]">Ingresar al Nodo</p>
+                `;
+                grid.appendChild(btn);
+            });
+        }
+
+        function generateHighVolumeGuides(carrier) {
+            const count = Math.floor(Math.random() * 80) + 40;
+            return Array.from({length: count}, (_, i) => ({
+                guide: `CUBBO-${carrier.substring(0,2)}-${(100000 + i).toString()}`,
+                time: new Date().toLocaleTimeString('es-MX', {hour12: false})
+            }));
+        }
+
+        async function fetchConsolidatedData() {
+            if (!window.auth.currentUser) return;
+
+            const tbody = document.getElementById('query-results');
+            tbody.innerHTML = '<tr><td colspan="4" class="px-6 py-10 text-center text-slate-400 italic">Conectando con base de datos de Embarques...</td></tr>';
+            
+            const selectedDate = document.getElementById('filter-date').value;
+            if (!selectedDate) {
+                alert("Selecciona la fecha de operación.");
+                return;
+            }
+
+            const carriers = warehouseData[currentWH] || [];
+            fetchedDataFromDB = {}; 
+            tbody.innerHTML = '';
+
+            for (const carrier of carriers) {
+                const docId = `${currentWH}-${carrier}-${selectedDate}`.replace(/\s+/g, '_');
+                const docRef = window.firestore.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'manifests', docId);
+                
+                try {
+                    const snap = await window.firestore.getDoc(docRef);
+                    let isSigned = false;
+                    let guides = [];
+
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        isSigned = data.signed;
+                        guides = data.guides || [];
+                        fetchedDataFromDB[carrier] = data;
+                    } else {
+                        guides = generateHighVolumeGuides(carrier);
+                        fetchedDataFromDB[carrier] = { guides, signed: false };
+                    }
+
+                    const tr = document.createElement('tr');
+                    tr.className = "hover:bg-slate-50 border-b border-slate-50 transition group";
+                    tr.innerHTML = `
+                        <td class="px-6 py-5 font-bold text-slate-700">${carrier}</td>
+                        <td class="px-6 py-5">
+                            ${isSigned ? 
+                              '<span class="bg-green-100 text-green-700 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border border-green-200">DESPACHADO</span>' : 
+                              '<span class="bg-blue-50 text-blue-600 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border border-blue-100">POR SALIR</span>'}
+                        </td>
+                        <td class="px-6 py-5 text-sm text-slate-500 font-mono font-bold">${guides.length} bultos</td>
+                        <td class="px-6 py-5 text-right">
+                            <button onclick="openManifest('${carrier}', ${isSigned})" class="${isSigned ? 'bg-slate-800' : 'bg-blue-600 hover:bg-blue-700'} text-white px-6 py-2 rounded-xl text-[10px] font-bold uppercase transition shadow-md">
+                                ${isSigned ? 'Ver Manifiesto' : 'Confirmar Salida'}
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+
+                } catch (e) { console.error("Error consulta:", e); }
+            }
+        }
+
+        async function openManifest(carrier, isSigned) {
+            currentCarrier = carrier;
+            const date = document.getElementById('filter-date').value;
+            currentLoteId = `${currentWH}-${carrier}-${date}`.replace(/\s+/g, '_');
+            
+            const data = fetchedDataFromDB[carrier];
+            const guides = data.guides || [];
+
+            document.getElementById('dashboard').classList.add('hidden');
+            document.getElementById('manifest-viewer').classList.remove('hidden');
+            
+            document.getElementById('doc-id').innerText = `Embarque ID: #${currentLoteId}`;
+            document.getElementById('doc-courier').innerText = carrier;
+            document.getElementById('doc-count').innerText = `${guides.length} Guías`;
+            document.getElementById('doc-date').innerText = date;
+            document.getElementById('doc-warehouse-origin').innerText = currentWH;
+
+            const mTable = document.getElementById('manifest-table-body');
+            mTable.innerHTML = '';
+            
+            const fragment = document.createDocumentFragment();
+            guides.forEach((g, i) => {
+                const tr = document.createElement('tr');
+                tr.className = "border-b border-slate-50";
+                tr.innerHTML = `
+                    <td class="p-3 text-slate-400 font-bold">${i+1}</td>
+                    <td class="p-3 font-mono font-black text-slate-900">${g.guide}</td>
+                    <td class="p-3 text-slate-500 font-medium">${g.time}</td>
+                `;
+                fragment.appendChild(tr);
+            });
+            mTable.appendChild(fragment);
+
+            if(isSigned) {
+                showSignatureImage(data.signature);
+                document.getElementById('finish-btn').classList.add('hidden');
+                document.getElementById('download-btn').classList.remove('hidden');
+                document.getElementById('signature-container').classList.add('hidden');
+            } else {
+                resetManifestUI();
+                setTimeout(initSig, 100);
+            }
+        }
+
+        async function unifiedFinish() {
+            if (!window.auth.currentUser) return;
+            const signatureData = canvas.toDataURL();
+            const blank = document.createElement('canvas');
+            blank.width = canvas.width; blank.height = canvas.height;
+            if (signatureData === blank.toDataURL()) {
+                alert("Es necesaria la firma del chofer transportista.");
+                return;
+            }
+
+            document.getElementById('loader').classList.remove('hidden');
+            document.getElementById('loader-text').innerText = "Firmando Embarque Digitalmente...";
+
+            try {
+                const date = document.getElementById('filter-date').value;
+                const docRef = window.firestore.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'manifests', currentLoteId);
+                
+                const finalData = {
+                    carrier: currentCarrier,
+                    warehouse: currentWH,
+                    date: date,
+                    guides: fetchedDataFromDB[currentCarrier].guides,
+                    signature: signatureData,
+                    signed: true,
+                    timestamp: new Date().toISOString()
+                };
+
+                await window.firestore.setDoc(docRef, finalData);
+                showSignatureImage(signatureData);
+                document.getElementById('signature-container').classList.add('hidden');
+                
+                document.getElementById('loader-text').innerText = "Generando PDF de Manifiesto...";
+                await downloadPDF();
+
+                setTimeout(() => {
+                    document.getElementById('loader').classList.add('hidden');
+                    hideManifest();
+                    fetchConsolidatedData();
+                }, 1000);
+
+            } catch(e) {
+                alert("Error de conexión. Reintenta.");
+                document.getElementById('loader').classList.add('hidden');
+            }
+        }
+
+        function showSignatureImage(data) {
+            const img = new Image();
+            img.src = data;
+            img.className = "max-h-24 opacity-90 contrast-125";
+            document.getElementById('sig-image-container').innerHTML = '';
+            document.getElementById('sig-image-container').appendChild(img);
+        }
+
+        function resetManifestUI() {
+            document.getElementById('signature-container').classList.remove('hidden');
+            document.getElementById('sig-image-container').innerHTML = '<p class="text-slate-300 text-[10px] uppercase font-bold italic animate-pulse">Chofer firma aquí</p>';
+            document.getElementById('download-btn').classList.add('hidden');
+            document.getElementById('finish-btn').classList.remove('hidden');
+            clearSignature();
+        }
+
+        function hideManifest() {
+            document.getElementById('dashboard').classList.remove('hidden');
+            document.getElementById('manifest-viewer').classList.add('hidden');
+        }
+
+        function backToWarehouses() {
+            document.getElementById('main-app').classList.add('hidden');
+            document.getElementById('warehouse-selection').classList.remove('hidden');
+        }
+
+        function initSig() {
+            const r = canvas.getBoundingClientRect();
+            canvas.width = r.width; canvas.height = r.height;
+            ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 3; ctx.lineCap = "round";
+        }
+        canvas.addEventListener('mousedown', () => drawing = true);
+        window.addEventListener('mouseup', () => { drawing = false; ctx.beginPath(); });
+        canvas.addEventListener('mousemove', (e) => {
+            if(!drawing) return;
+            const r = canvas.getBoundingClientRect();
+            ctx.lineTo(e.clientX - r.left, e.clientY - r.top);
+            ctx.stroke(); ctx.beginPath(); ctx.moveTo(e.clientX - r.left, e.clientY - r.top);
+        });
+        function clearSignature() { ctx.clearRect(0,0,canvas.width,canvas.height); ctx.beginPath(); }
+
+        async function downloadPDF() {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF('p', 'mm', 'a4');
+            const el = document.getElementById('document-to-print');
+            const c = await html2canvas(el, { scale: 1.5, useCORS: true });
+            const w = doc.internal.pageSize.getWidth();
+            const h = (c.height * w) / c.width;
+            doc.addImage(c.toDataURL('image/png'), 'PNG', 0, 0, w, h);
+            doc.save(`EMBARQUES_CUBBO_${currentCarrier}_${currentLoteId}.pdf`);
+            return Promise.resolve();
+        }
+    </script>
+</body>
+</html>
